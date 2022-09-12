@@ -4,13 +4,16 @@ import (
 	"context"
 	"fmt"
 	"github.com/go-redis/redis/v8"
+	"github.com/go-zookeeper/zk"
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/ory/dockertest/v3"
 	"github.com/ory/dockertest/v3/docker"
+	"github.com/segmentio/kafka-go"
 	"log"
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 )
 
 var (
@@ -20,6 +23,9 @@ var (
 	redisClient      redis.UniversalClient
 	redisCache       *RedisCache
 	redisStreamCache *RedisStreamCache
+
+	kafkaConn  *kafka.Conn
+	kafkaCache *KafkaCache
 )
 
 func TestMain(m *testing.M) {
@@ -38,10 +44,20 @@ func TestMain(m *testing.M) {
 	redisCache = NewRedisCache(redisClient)
 	redisStreamCache = NewRedisStreamCache(redisClient)
 
+	netWork, err := dockerPool.Client.CreateNetwork(docker.CreateNetworkOptions{Name: "zookeeper_kafka_network"})
+	if err != nil {
+		log.Fatalf("could not create a network to zookeeper and kafka: %s", err)
+	}
+	zooKeeperResource := initializeZooKeeper(dockerPool, newZooKeeper(netWork.ID))
+	kafkaResource := initializeKafka(dockerPool, newKafkaConfig(netWork.ID))
+	kafkaCache = NewKafkaCache(kafkaConn)
+
 	code := m.Run()
 
-	purgeResources(dockerPool, postgresResource, redisResource)
-
+	purgeResources(dockerPool, postgresResource, redisResource, zooKeeperResource, kafkaResource)
+	if err = dockerPool.Client.RemoveNetwork(netWork.ID); err != nil {
+		log.Fatalf("could not remove %s network: %s", netWork.Name, err)
+	}
 	os.Exit(code)
 }
 
@@ -108,6 +124,70 @@ func initializeRedis(ctx context.Context, dockerPool *dockertest.Pool, rConfig *
 		log.Fatal(err)
 	}
 	return redisResource
+}
+
+func initializeZooKeeper(dockerPool *dockertest.Pool, cfg *zooKeeperConfig) *dockertest.Resource {
+	zookeeperResource, err := dockerPool.RunWithOptions(&dockertest.RunOptions{
+		Name:         cfg.Name,
+		Repository:   cfg.Repository,
+		Tag:          cfg.Tag,
+		NetworkID:    cfg.NetworkID,
+		Hostname:     cfg.Hostname,
+		ExposedPorts: cfg.ExposedPorts,
+	})
+	if err != nil {
+		log.Fatalf("could not start zookeeper: %s", err)
+	}
+
+	conn, _, err := zk.Connect([]string{cfg.getConnectionString(zookeeperResource.GetPort(cfg.ExposedPorts[0]))}, 10*time.Second)
+	if err != nil {
+		log.Fatalf("could not connect zookeeper: %s", err)
+	}
+	defer conn.Close()
+
+	retryFn := func() error {
+		switch conn.State() {
+		case zk.StateHasSession, zk.StateConnected:
+			return nil
+		default:
+			return fmt.Errorf("can't connect to zookeeper")
+		}
+	}
+
+	if err = dockerPool.Retry(retryFn); err != nil {
+		log.Fatalf("could not connect to zookeeper: %s", err)
+	}
+	return zookeeperResource
+}
+
+func initializeKafka(dockerPool *dockertest.Pool, cfg *kafkaConfig) *dockertest.Resource {
+	kafkaResource, err := dockerPool.RunWithOptions(&dockertest.RunOptions{
+		Name:         cfg.Name,
+		Repository:   cfg.Repository,
+		Tag:          cfg.Tag,
+		NetworkID:    cfg.NetworkID,
+		Hostname:     cfg.Hostname,
+		Env:          cfg.Env,
+		PortBindings: cfg.PortBindings,
+		ExposedPorts: cfg.ExposedPorts,
+	})
+	if err != nil {
+		log.Fatalf("could not start kafka: %s", err)
+	}
+	err = dockerPool.Retry(func() error {
+		ctx := context.Background()
+		partition := 0
+		network, address := cfg.getConnectionString(kafkaResource.GetPort(cfg.ExposedPorts[0]))
+		kafkaConn, err = kafka.DialLeader(ctx, network, address, cacheTopic, partition)
+		if err != nil {
+			return err
+		}
+		return err
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	return kafkaResource
 }
 
 func purgeResources(dockerPool *dockertest.Pool, resources ...*dockertest.Resource) {
@@ -179,4 +259,66 @@ func (r *redisConfig) getConnectionString(dbHostAndPort string) string {
 		dbHostAndPort,
 		r.DB,
 	)
+}
+
+type kafkaConfig struct {
+	Name         string
+	Repository   string
+	Tag          string
+	NetworkID    string
+	Hostname     string
+	Env          []string
+	PortBindings map[docker.Port][]docker.PortBinding
+	ExposedPorts []string
+}
+
+func newKafkaConfig(networkID string) *kafkaConfig {
+	return &kafkaConfig{
+		Name:       "kafka-example",
+		Repository: "wurstmeister/kafka",
+		Tag:        "2.13-2.8.1",
+		NetworkID:  networkID,
+		Hostname:   "kafka",
+		Env: []string{
+			"KAFKA_CREATE_TOPICS=domain.test:1:1:compact",
+			"KAFKA_ADVERTISED_LISTENERS=INSIDE://kafka:9092,OUTSIDE://localhost:9093",
+			"KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT",
+			"KAFKA_LISTENERS=INSIDE://0.0.0.0:9092,OUTSIDE://0.0.0.0:9093",
+			"KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181",
+			"KAFKA_INTER_BROKER_LISTENER_NAME=INSIDE",
+			"KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1",
+		},
+		PortBindings: map[docker.Port][]docker.PortBinding{
+			"9093/tcp": {{HostIP: "localhost", HostPort: "9093/tcp"}},
+		},
+		ExposedPorts: []string{"9093/tcp"},
+	}
+}
+
+func (f *kafkaConfig) getConnectionString(port string) (string, string) {
+	return "tcp", fmt.Sprintf("localhost:%s", port)
+}
+
+type zooKeeperConfig struct {
+	Name         string
+	Repository   string
+	Tag          string
+	NetworkID    string
+	Hostname     string
+	ExposedPorts []string
+}
+
+func newZooKeeper(networkID string) *zooKeeperConfig {
+	return &zooKeeperConfig{
+		Name:         "zookeeper-example",
+		Repository:   "wurstmeister/zookeeper",
+		Tag:          "latest",
+		NetworkID:    networkID,
+		Hostname:     "zookeeper",
+		ExposedPorts: []string{"2181/tcp"},
+	}
+}
+
+func (*zooKeeperConfig) getConnectionString(port string) string {
+	return fmt.Sprintf("127.0.0.1:%s", port)
 }
