@@ -53,11 +53,10 @@ func (s *RedisStreamCache) Get(id uuid.UUID) (*model.User, error) {
 	return &u, nil
 }
 
-func (s *RedisStreamCache) Delete(id uuid.UUID) error {
+func (s *RedisStreamCache) Delete(id uuid.UUID) {
 	s.cacheMU.Lock()
 	delete(s.cache, id)
 	s.cacheMU.Unlock()
-	return nil
 }
 
 func (s *RedisStreamCache) ListenToCreate(ctx context.Context, errChan chan<- error) {

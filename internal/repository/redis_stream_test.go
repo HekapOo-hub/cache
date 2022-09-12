@@ -68,8 +68,7 @@ func TestRedisStreamCache_Delete(t *testing.T) {
 	err := redisStreamCache.Create(ctx, &u)
 	require.NoError(t, err)
 	time.Sleep(time.Second)
-	err = redisStreamCache.Delete(u.ID)
-	require.NoError(t, err)
+	redisStreamCache.Delete(u.ID)
 
 	_, err = redisStreamCache.Get(u.ID)
 	require.ErrorIs(t, err, ErrEntityNotFound)

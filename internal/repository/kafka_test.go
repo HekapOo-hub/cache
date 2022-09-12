@@ -69,8 +69,7 @@ func TestKafkaCache_Delete(t *testing.T) {
 	err := kafkaCache.Create(&u)
 	require.NoError(t, err)
 	time.Sleep(time.Second)
-	err = kafkaCache.Delete(u.ID)
-	require.NoError(t, err)
+	kafkaCache.Delete(u.ID)
 	_, err = kafkaCache.Get(u.ID)
 	require.ErrorIs(t, err, ErrEntityNotFound)
 

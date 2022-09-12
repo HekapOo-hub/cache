@@ -46,16 +46,15 @@ func (k *KafkaCache) Get(id uuid.UUID) (*model.User, error) {
 	u, ok := k.cache[id]
 	k.cacheMU.RUnlock()
 	if !ok {
-		return nil, ErrEntityNotFound
+		return nil, fmt.Errorf("kafka cache: get: %w", ErrEntityNotFound)
 	}
 	return &u, nil
 }
 
-func (k *KafkaCache) Delete(id uuid.UUID) error {
+func (k *KafkaCache) Delete(id uuid.UUID) {
 	k.cacheMU.Lock()
 	delete(k.cache, id)
 	k.cacheMU.Unlock()
-	return nil
 }
 
 func (k *KafkaCache) ListenToCreate(ctx context.Context, errChan chan<- error) {
