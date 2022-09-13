@@ -8,7 +8,6 @@ import (
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/ory/dockertest/v3"
 	"github.com/ory/dockertest/v3/docker"
-	ampq "github.com/rabbitmq/amqp091-go"
 	"github.com/segmentio/kafka-go"
 	"log"
 	"os"
@@ -27,9 +26,6 @@ var (
 
 	kafkaConn  *kafka.Conn
 	kafkaCache *KafkaCache
-
-	rabbitConn  *ampq.Connection
-	rabbitCache *RabbitCache
 )
 
 func TestMain(m *testing.M) {
@@ -48,12 +44,6 @@ func TestMain(m *testing.M) {
 	redisCache = NewRedisCache(redisClient)
 	redisStreamCache = NewRedisStreamCache(redisClient)
 
-	rabbitResource := initializeRabbit(dockerPool, newRabbitConfig())
-	rabbitCache, err = NewRabbitCache(rabbitConn)
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	netWork, err := dockerPool.Client.CreateNetwork(docker.CreateNetworkOptions{Name: "zookeeper_kafka_network"})
 	if err != nil {
 		log.Fatalf("could not create a network to zookeeper and kafka: %s", err)
@@ -64,7 +54,7 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
-	purgeResources(dockerPool, postgresResource, redisResource, zooKeeperResource, kafkaResource, rabbitResource)
+	purgeResources(dockerPool, postgresResource, redisResource, zooKeeperResource, kafkaResource)
 	if err = dockerPool.Client.RemoveNetwork(netWork.ID); err != nil {
 		log.Fatalf("could not remove %s network: %s", netWork.Name, err)
 	}
@@ -72,7 +62,7 @@ func TestMain(m *testing.M) {
 }
 
 func initializePostgres(ctx context.Context, dockerPool *dockertest.Pool, cfg *postgresConfig) *dockertest.Resource {
-	resource, err := dockerPool.Run(cfg.Repository, cfg.Tag, cfg.EnvVariables)
+	resource, err := dockerPool.Run(cfg.Repository, cfg.Version, cfg.EnvVariables)
 	if err != nil {
 		log.Fatalf("Could not start resource: %s", err)
 	}
@@ -105,7 +95,7 @@ func initializePostgres(ctx context.Context, dockerPool *dockertest.Pool, cfg *p
 func initializeRedis(ctx context.Context, dockerPool *dockertest.Pool, rConfig *redisConfig) *dockertest.Resource {
 	redisResource, err := dockerPool.RunWithOptions(&dockertest.RunOptions{
 		Repository: rConfig.Repository,
-		Tag:        rConfig.Tag,
+		Tag:        rConfig.Version,
 	}, func(cfg *docker.HostConfig) {
 		cfg.AutoRemove = rConfig.AutoRemove
 		cfg.RestartPolicy = docker.RestartPolicy{
@@ -200,33 +190,6 @@ func initializeKafka(dockerPool *dockertest.Pool, cfg *kafkaConfig) *dockertest.
 	return kafkaResource
 }
 
-func initializeRabbit(dockerPool *dockertest.Pool, rCfg *rabbitConfig) *dockertest.Resource {
-	rabbitResource, err := dockerPool.RunWithOptions(&dockertest.RunOptions{
-		Repository: rCfg.Repository,
-		Tag:        rCfg.Tag,
-	}, func(cfg *docker.HostConfig) {
-		cfg.AutoRemove = rCfg.AutoRemove
-		cfg.RestartPolicy = docker.RestartPolicy{
-			Name: rCfg.RestartPolicy,
-		}
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-	retryFn := func() error {
-		rabbitConn, err = ampq.Dial(rCfg.getConnectionString(rabbitResource.GetHostPort(rCfg.PortID)))
-		if err != nil {
-			return err
-		}
-		return nil
-	}
-
-	if err = dockerPool.Retry(retryFn); err != nil {
-		log.Fatal(err)
-	}
-	return rabbitResource
-}
-
 func purgeResources(dockerPool *dockertest.Pool, resources ...*dockertest.Resource) {
 	for i := range resources {
 		if err := dockerPool.Purge(resources[i]); err != nil {
@@ -243,7 +206,7 @@ func purgeResources(dockerPool *dockertest.Pool, resources ...*dockertest.Resour
 
 type postgresConfig struct {
 	Repository   string
-	Tag          string
+	Version      string
 	EnvVariables []string
 	PortID       string
 }
@@ -251,7 +214,7 @@ type postgresConfig struct {
 func newPostgresConfig() *postgresConfig {
 	return &postgresConfig{
 		Repository:   "postgres",
-		Tag:          "14.1-alpine",
+		Version:      "14.1-alpine",
 		EnvVariables: []string{"POSTGRES_PASSWORD=password123"},
 		PortID:       "5432/tcp",
 	}
@@ -274,7 +237,7 @@ func (p *postgresConfig) getFlywayMigrationArgs(dbHostAndPort string) []string {
 type redisConfig struct {
 	Repository    string
 	DB            int
-	Tag           string
+	Version       string
 	PortID        string
 	RestartPolicy string
 	AutoRemove    bool
@@ -284,7 +247,7 @@ func newRedisConfig() *redisConfig {
 	return &redisConfig{
 		Repository:    "redis",
 		DB:            0,
-		Tag:           "7-alpine",
+		Version:       "7-alpine",
 		PortID:        "6379/tcp",
 		RestartPolicy: "no",
 		AutoRemove:    true,
@@ -358,26 +321,4 @@ func newZooKeeper(networkID string) *zooKeeperConfig {
 
 func (*zooKeeperConfig) getConnectionString(port string) string {
 	return fmt.Sprintf("127.0.0.1:%s", port)
-}
-
-type rabbitConfig struct {
-	Repository    string
-	Tag           string
-	PortID        string
-	RestartPolicy string
-	AutoRemove    bool
-}
-
-func newRabbitConfig() *rabbitConfig {
-	return &rabbitConfig{
-		Repository:    "rabbitmq",
-		Tag:           "latest",
-		PortID:        "5672/tcp",
-		RestartPolicy: "no",
-		AutoRemove:    true,
-	}
-}
-
-func (r *rabbitConfig) getConnectionString(hostAndPort string) string {
-	return fmt.Sprintf("amqp://guest:guest@%s/", hostAndPort)
 }
