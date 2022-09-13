@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func TestStreamCache_Create(t *testing.T) {
+func TestRedisStreamCache_Create(t *testing.T) {
 	errChan := make(chan error)
 	ctx, cancel := context.WithCancel(context.Background())
 	go redisStreamCache.ListenToCreate(ctx, errChan)
@@ -24,11 +24,10 @@ func TestStreamCache_Create(t *testing.T) {
 	time.Sleep(time.Second)
 	actualUser, err := redisStreamCache.Get(u.ID)
 	require.NoError(t, err)
-
 	require.Equal(t, u, *actualUser)
+
 	cancel()
-	err = <-errChan
-	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, <-errChan, context.Canceled)
 }
 
 func TestRedisStreamCache_Sync(t *testing.T) {
@@ -36,6 +35,7 @@ func TestRedisStreamCache_Sync(t *testing.T) {
 	errChan := make(chan error)
 	redisStreamCacheCpy := NewRedisStreamCache(redisClient)
 	go redisStreamCacheCpy.ListenToCreate(ctx, errChan)
+	go redisStreamCache.ListenToCreate(ctx, errChan)
 
 	u := model.User{
 		ID:    uuid.New(),
@@ -47,12 +47,16 @@ func TestRedisStreamCache_Sync(t *testing.T) {
 	require.NoError(t, err)
 	time.Sleep(time.Second)
 
-	actualUser, err := redisStreamCacheCpy.Get(u.ID)
+	actualUserCpy, err := redisStreamCacheCpy.Get(u.ID)
+	require.NoError(t, err)
+	require.Equal(t, u, *actualUserCpy)
+
+	actualUser, err := redisStreamCache.Get(u.ID)
 	require.NoError(t, err)
 	require.Equal(t, u, *actualUser)
 	cancel()
-	err = <-errChan
-	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, <-errChan, context.Canceled)
+	require.ErrorIs(t, <-errChan, context.Canceled)
 }
 
 func TestRedisStreamCache_Delete(t *testing.T) {
@@ -74,6 +78,5 @@ func TestRedisStreamCache_Delete(t *testing.T) {
 	require.ErrorIs(t, err, ErrEntityNotFound)
 
 	cancel()
-	err = <-errChan
-	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, <-errChan, context.Canceled)
 }

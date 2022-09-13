@@ -1,11 +1,11 @@
 package consumer
 
 import (
-	"cache/internal/model"
-	"cache/internal/producer"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/HekapOo-hub/cache/internal/model"
+	"github.com/HekapOo-hub/cache/internal/producer"
 	"github.com/go-redis/redis/v8"
 	"sync"
 )

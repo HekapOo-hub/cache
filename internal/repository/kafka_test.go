@@ -37,6 +37,7 @@ func TestKafkaCache_Sync(t *testing.T) {
 	errChan := make(chan error)
 	kafkaCacheCpy := NewKafkaCache(kafkaConn)
 	go kafkaCacheCpy.ListenToCreate(ctx, errChan)
+	go kafkaCache.ListenToCreate(ctx, errChan)
 	u := model.User{
 		ID:    uuid.New(),
 		Name:  "Stream",
@@ -47,7 +48,11 @@ func TestKafkaCache_Sync(t *testing.T) {
 	require.NoError(t, err)
 	time.Sleep(time.Second)
 
-	actualUser, err := kafkaCacheCpy.Get(u.ID)
+	actualUserCpy, err := kafkaCacheCpy.Get(u.ID)
+	require.NoError(t, err)
+	require.Equal(t, u, *actualUserCpy)
+
+	actualUser, err := kafkaCache.Get(u.ID)
 	require.NoError(t, err)
 	require.Equal(t, u, *actualUser)
 	cancel()
