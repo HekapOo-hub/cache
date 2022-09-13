@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/ory/dockertest/v3"
 	"github.com/ory/dockertest/v3/docker"
+	ampq "github.com/rabbitmq/amqp091-go"
 	"github.com/segmentio/kafka-go"
 	"log"
 	"os"
@@ -26,6 +27,9 @@ var (
 
 	kafkaConn  *kafka.Conn
 	kafkaCache *KafkaCache
+
+	rabbitConn  *ampq.Connection
+	rabbitCache *RabbitCache
 )
 
 func TestMain(m *testing.M) {
@@ -44,6 +48,11 @@ func TestMain(m *testing.M) {
 	redisCache = NewRedisCache(redisClient)
 	redisStreamCache = NewRedisStreamCache(redisClient)
 
+	rabbitResource := initializeRabbit(dockerPool, newRabbitConfig())
+	rabbitCache, err = NewRabbitCache(rabbitConn)
+	if err != nil {
+		log.Fatal(err)
+	}
 	netWork, err := dockerPool.Client.CreateNetwork(docker.CreateNetworkOptions{Name: "zookeeper_kafka_network"})
 	if err != nil {
 		log.Fatalf("could not create a network to zookeeper and kafka: %s", err)
@@ -54,7 +63,7 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
-	purgeResources(dockerPool, postgresResource, redisResource, zooKeeperResource, kafkaResource)
+	purgeResources(dockerPool, postgresResource, redisResource, zooKeeperResource, kafkaResource, rabbitResource)
 	if err = dockerPool.Client.RemoveNetwork(netWork.ID); err != nil {
 		log.Fatalf("could not remove %s network: %s", netWork.Name, err)
 	}
@@ -158,6 +167,27 @@ func initializeZooKeeper(dockerPool *dockertest.Pool, cfg *zooKeeperConfig) *doc
 		log.Fatalf("could not connect to zookeeper: %s", err)
 	}
 	return zookeeperResource
+}
+
+func initializeRabbit(dockerPool *dockertest.Pool, rCfg *rabbitConfig) *dockertest.Resource {
+	rabbitResource, err := dockerPool.RunWithOptions(&dockertest.RunOptions{
+		Repository: rCfg.Repository,
+		Tag:        rCfg.Tag,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	err = dockerPool.Retry(func() error {
+		rabbitConn, err = ampq.Dial(rCfg.getConnectionString(rabbitResource.GetHostPort(rCfg.PortID)))
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	return rabbitResource
 }
 
 func initializeKafka(dockerPool *dockertest.Pool, cfg *kafkaConfig) *dockertest.Resource {
@@ -321,4 +351,22 @@ func newZooKeeper(networkID string) *zooKeeperConfig {
 
 func (*zooKeeperConfig) getConnectionString(port string) string {
 	return fmt.Sprintf("127.0.0.1:%s", port)
+}
+
+type rabbitConfig struct {
+	Repository string
+	Tag        string
+	PortID     string
+}
+
+func newRabbitConfig() *rabbitConfig {
+	return &rabbitConfig{
+		Repository: "rabbitmq",
+		Tag:        "latest",
+		PortID:     "5672/tcp",
+	}
+}
+
+func (*rabbitConfig) getConnectionString(hostAndPort string) string {
+	return fmt.Sprintf("amqp://guest:guest@%s/", hostAndPort)
 }
